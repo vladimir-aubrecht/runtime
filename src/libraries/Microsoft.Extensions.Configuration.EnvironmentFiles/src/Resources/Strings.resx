@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="Error_InvalidAssignment" xml:space="preserve">
+    <value>Expected a name=value assignment on line {0}.</value>
+  </data>
+  <data name="Error_InvalidFilePath" xml:space="preserve">
+    <value>File path must be a non-empty string.</value>
+  </data>
+  <data name="Error_InvalidName" xml:space="preserve">
+    <value>Invalid environment variable name on line {0}.</value>
+  </data>
+  <data name="Error_InvalidSyntax" xml:space="preserve">
+    <value>The value contains unsupported environment file syntax options.</value>
+  </data>
+  <data name="Error_TrailingCharacters" xml:space="preserve">
+    <value>Unexpected characters after the quoted value on line {0}.</value>
+  </data>
+  <data name="Error_UnterminatedValue" xml:space="preserve">
+    <value>Unterminated quoted value on line {0}. Multiline values are not supported.</value>
+  </data>
+</root>
