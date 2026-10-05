@@ -2877,6 +2877,442 @@ if (!System.Diagnostics.Debugger.IsAttached) { System.Diagnostics.Debugger.Launc
         }
 
         [Fact]
+        public void TypeConverterAttributeOnPropertyIsUsed()
+        {
+            var configuration = TestHelpers.GetConfigurationFromJsonString("""
+                {
+                    "Value": "41",
+                    "NullableValue": "",
+                    "Values": "1,2,3"
+                }
+                """);
+
+            PropertyTypeConverterOptions options = configuration.Get<PropertyTypeConverterOptions>();
+
+            Assert.Equal(42, options.Value);
+            Assert.Equal(42, options.NullableValue);
+            Assert.Equal([1, 2, 3], options.Values);
+        }
+
+        [Fact]
+        public void TypeConverterAttributeOnConstructorBoundPropertyIsUsed()
+        {
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    [nameof(PropertyTypeConverterConstructorOptions.Value)] = "41"
+                })
+                .Build();
+
+            PropertyTypeConverterConstructorOptions options = configuration.Get<PropertyTypeConverterConstructorOptions>();
+
+            Assert.Equal(42, options.Value);
+        }
+
+        [Fact]
+        public void TypeConverterAttributeOnConstructorBoundOverrideIsInherited()
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41" }""");
+            Assert.Equal(42, configuration.Get<PropertyTypeConverterGetterOverride>().Value);
+            Assert.Equal(42, configuration.Get<PropertyTypeConverterSetterOverride>().GetValue());
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeDoesNotOverrideConfigurationSections(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41", "ReadOnly": "41" }""");
+            PropertyTypeConverterSectionOptions options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterSectionOptions>();
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options);
+            }
+
+            Assert.Equal("Value", options.Value.Path);
+            Assert.Equal("41", options.Value.Value);
+            Assert.Equal("initial", options.ReadOnly.Path);
+
+            PropertyTypeConverterSectionConstructorOptions constructed = configuration.Get<PropertyTypeConverterSectionConstructorOptions>();
+            Assert.Equal("41", constructed.Value.Value);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeOnNonPublicPropertyIsUsed(bool bindNonPublic)
+        {
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Value"] = "41"
+                })
+                .Build();
+
+#if BUILDING_SOURCE_GENERATOR_TESTS
+            if (bindNonPublic)
+            {
+                NotSupportedException exception = Assert.Throws<NotSupportedException>(() =>
+                    configuration.Get<NonPublicPropertyTypeConverterOptions>(binderOptions => binderOptions.BindNonPublicProperties = true));
+                Assert.Contains("BinderOptions.BindNonPublicProperties", exception.Message);
+                return;
+            }
+#endif
+            NonPublicPropertyTypeConverterOptions options = configuration.Get<NonPublicPropertyTypeConverterOptions>(
+                binderOptions => binderOptions.BindNonPublicProperties = bindNonPublic);
+
+            Assert.Equal(bindNonPublic ? 42 : 0, options.GetValue());
+        }
+
+        [Fact]
+        public void TypeConverterAttributeOnPropertyWrapsConversionException()
+        {
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    [nameof(PropertyTypeConverterFailureOptions.Value)] = "invalid"
+                })
+                .Build();
+
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+                () => configuration.Get<PropertyTypeConverterFailureOptions>());
+
+            Assert.Equal(
+                SR.Format(
+                    SR.Error_FailedBinding,
+                    "invalid",
+                    nameof(PropertyTypeConverterFailureOptions.Value),
+                    typeof(int)),
+                exception.Message);
+            Assert.Equal("Custom conversion failed.", Assert.IsType<NotSupportedException>(exception.InnerException).Message);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributePreservesHiddenPropertyIdentity(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41" }""");
+            PropertyTypeConverterHiddenStringOptions stringOptions;
+            PropertyTypeConverterHiddenIntOptions intOptions;
+
+            if (useGet)
+            {
+                stringOptions = configuration.Get<PropertyTypeConverterHiddenStringOptions>();
+                intOptions = configuration.Get<PropertyTypeConverterHiddenIntOptions>();
+            }
+            else
+            {
+                stringOptions = new();
+                intOptions = new();
+                configuration.Bind(stringOptions);
+                configuration.Bind(intOptions);
+            }
+
+            Assert.Equal("41", stringOptions.Value);
+            Assert.Equal(42, ((PropertyTypeConverterBaseOptions)stringOptions).Value);
+            Assert.Equal(51, intOptions.Value);
+            Assert.Equal(42, ((PropertyTypeConverterBaseOptions)intOptions).Value);
+        }
+
+        [Fact]
+        public void TypeConverterAttributeConstructorRequiresMatchingPropertyType()
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41" }""");
+
+            PropertyTypeConverterMismatchedConstructorOptions options =
+                configuration.Get<PropertyTypeConverterMismatchedConstructorOptions>();
+
+            Assert.Equal("41", options.Text);
+            Assert.Equal(0, options.Value);
+
+            PropertyTypeConverterHiddenConstructorOptions hidden = configuration.Get<PropertyTypeConverterHiddenConstructorOptions>();
+            Assert.Equal(51, hidden.Value);
+            Assert.Equal(0, ((PropertyTypeConverterBaseOptions)hidden).Value);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeHonorsVirtualOverrides(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41" }""");
+            PropertyTypeConverterOverrideOptions options;
+            PropertyTypeConverterInheritedOverrideOptions inherited;
+            PropertyTypeConverterDefaultOverrideOptions defaults;
+            PropertyTypeConverterPlainOverrideOptions plain;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterOverrideOptions>();
+                inherited = configuration.Get<PropertyTypeConverterInheritedOverrideOptions>();
+                defaults = configuration.Get<PropertyTypeConverterDefaultOverrideOptions>();
+                plain = configuration.Get<PropertyTypeConverterPlainOverrideOptions>();
+            }
+            else
+            {
+                options = new();
+                inherited = new();
+                defaults = new();
+                plain = new();
+                configuration.Bind(options);
+                configuration.Bind(inherited);
+                configuration.Bind(defaults);
+                configuration.Bind(plain);
+            }
+
+            Assert.Equal(42, options.Value);
+            Assert.Equal(42, inherited.Value);
+            Assert.Equal(41, defaults.Value);
+            Assert.Equal(42, plain.Value);
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void TypeConverterAttributeWithoutStringConversionUsesBuiltInConversion(bool useGet, bool errorOnUnknownConfiguration)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""
+                { "Value": "41", "RawValue": "hello", "NullableValue": "" }
+                """);
+            PropertyTypeConverterNonStringOptions options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterNonStringOptions>(
+                    binderOptions => binderOptions.ErrorOnUnknownConfiguration = errorOnUnknownConfiguration);
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options, binderOptions => binderOptions.ErrorOnUnknownConfiguration = errorOnUnknownConfiguration);
+            }
+
+            Assert.Equal(41, options.Value);
+            Assert.Equal("hello", options.RawValue);
+            Assert.Null(options.NullableValue);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeWithoutCustomConverterPreservesBuiltInConversion(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""
+                { "Value": "41", "InvalidConverter": "41", "MissingConverter": "41", "NullableValue": "" }
+                """);
+            PropertyTypeConverterDefaultOptions options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterDefaultOptions>();
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options);
+            }
+
+            Assert.Equal("41", options.Value);
+            Assert.Equal("41", options.InvalidConverter);
+            Assert.Equal("41", options.MissingConverter);
+            Assert.Null(options.NullableValue);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeDoesNotCreateConverterWithoutScalarValue(bool hasChildren)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString(
+                hasChildren ? """{ "Nested": { "Value": 42 } }""" : """{ "Unrelated": 1 }""");
+
+            PropertyTypeConverterOptionalOptions options = configuration.Get<PropertyTypeConverterOptionalOptions>();
+
+            if (hasChildren)
+            {
+                Assert.Equal(42, options.Nested.Value);
+            }
+            else
+            {
+                Assert.Null(options.Nested);
+            }
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeOnIgnoredOverrideIsNotUsed(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": "41" }""");
+            PropertyTypeConverterIgnoredOverride options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterIgnoredOverride>();
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options);
+            }
+
+            Assert.Equal(7, options.Value);
+
+#if !BUILDING_SOURCE_GENERATOR_TESTS
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(
+                () => configuration.Get<PropertyTypeConverterIgnoredGetterOverride>());
+            Assert.Equal(
+                SR.Format(SR.Error_ConstructorParametersDoNotMatchProperties, typeof(PropertyTypeConverterIgnoredGetterOverride), "value"),
+                exception.Message);
+
+            exception = Assert.Throws<InvalidOperationException>(
+                () => configuration.Get<PropertyTypeConverterIgnoredSetterOverride>());
+            Assert.Equal(
+                SR.Format(SR.Error_ConstructorParametersDoNotMatchProperties, typeof(PropertyTypeConverterIgnoredSetterOverride), "value"),
+                exception.Message);
+#endif
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeOnGetterOnlyRenamedCollectionUsesRenamedKeyOnly(bool useGet)
+        {
+            var values = new Dictionary<string, string?>
+            {
+                ["Renamed:0"] = "1",
+                ["Values:0"] = "2",
+            };
+            IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+            ConvertedRenamedVirtualCollectionOptions converted;
+            InheritedConvertedRenamedVirtualCollectionOptions inherited;
+
+            if (useGet)
+            {
+                converted = configuration.Get<ConvertedRenamedVirtualCollectionOptions>();
+                inherited = configuration.Get<InheritedConvertedRenamedVirtualCollectionOptions>();
+            }
+            else
+            {
+                converted = new();
+                inherited = new();
+                configuration.Bind(converted);
+                configuration.Bind(inherited);
+            }
+
+            Assert.Equal(new[] { 99, 1 }, converted.Values);
+            Assert.Equal(new[] { 99, 1 }, inherited.Values);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeWithNullValueResetsValueType(bool useGet)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Value": null }""");
+            PropertyTypeConverterNullInputOptions options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterNullInputOptions>();
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options);
+            }
+
+            Assert.Equal(0, options.Value);
+        }
+
+        [Theory]
+        [InlineData(null, false)]
+        [InlineData("", false)]
+        [InlineData("AQI=", false)]
+        [InlineData(null, true)]
+        [InlineData("", true)]
+        [InlineData("AQI=", true)]
+        public void TypeConverterAttributePreservesByteArrayAppending(string? value, bool useGet)
+        {
+            IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [nameof(PropertyTypeConverterByteArrayOptions.Converted)] = value,
+                [nameof(PropertyTypeConverterByteArrayOptions.Fallback)] = value,
+            }).Build();
+            PropertyTypeConverterByteArrayOptions options;
+
+            if (useGet)
+            {
+                options = configuration.Get<PropertyTypeConverterByteArrayOptions>();
+            }
+            else
+            {
+                options = new();
+                configuration.Bind(options);
+            }
+
+            byte[] expected = string.IsNullOrEmpty(value) ? [9] : [9, 1, 2];
+            Assert.Equal(expected, options.Converted);
+            Assert.Equal(expected, options.Fallback);
+        }
+
+        [Theory]
+        [InlineData(null, false)]
+        [InlineData(null, true)]
+        [InlineData("", true)]
+        public void TypeConverterAttributeNullableStructFallbackDistinguishesMissingAndNull(string? value, bool present)
+        {
+            var values = new Dictionary<string, string?> { ["Unrelated"] = "value" };
+            if (present)
+            {
+                values[nameof(PropertyTypeConverterRejectingOptions.Point)] = value;
+            }
+
+            IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+            PropertyTypeConverterRejectingOptions options = configuration.Get<PropertyTypeConverterRejectingOptions>();
+
+            if (present)
+            {
+                Assert.Null(options.Point);
+            }
+            else
+            {
+                Assert.Equal(7, options.Point.Value.X);
+            }
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TypeConverterAttributeRejectedCollectionRespectsStrictBinding(bool strict)
+        {
+            IConfiguration configuration = TestHelpers.GetConfigurationFromJsonString("""{ "Values": "invalid" }""");
+
+            if (strict)
+            {
+                InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+                    configuration.Get<PropertyTypeConverterRejectingOptions>(options => options.ErrorOnUnknownConfiguration = true));
+                Assert.Equal(
+                    SR.Format(SR.Error_FailedBinding, "invalid", nameof(PropertyTypeConverterRejectingOptions.Values), typeof(HashSet<int>)),
+                    exception.Message);
+            }
+            else
+            {
+                PropertyTypeConverterRejectingOptions options = configuration.Get<PropertyTypeConverterRejectingOptions>();
+                Assert.Equal([7], options.Values);
+            }
+        }
+
+        [Fact]
         public void ComplexObj_As_Dictionary_Element()
         {
             var configuration = TestHelpers.GetConfigurationFromJsonString("""

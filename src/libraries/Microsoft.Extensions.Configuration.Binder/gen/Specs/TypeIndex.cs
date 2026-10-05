@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using SourceGenerators;
 
@@ -27,6 +28,148 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
             CollectionSpec collectionSpec => CanBindTo(collectionSpec.ElementTypeRef),
             _ => throw new InvalidOperationException(),
         };
+
+        public bool HasPropertyTypeConverter(TypeSpec typeSpec, MethodsToGen overload, [NotNullWhen(true)] out PropertySpec? property)
+        {
+            PropertyBindingContext context = (overload & MethodsToGen.ConfigBinder_Get) is not 0
+                ? PropertyBindingContext.CreateInstance
+                : PropertyBindingContext.ExistingInstance;
+            Dictionary<TypeRef, PropertyBindingContext> visited = new();
+            return HasPropertyTypeConverterCore(typeSpec, context, out property);
+
+            bool HasPropertyTypeConverterCore(TypeSpec current, PropertyBindingContext currentContext, [NotNullWhen(true)] out PropertySpec? matchingProperty)
+            {
+                visited.TryGetValue(current.TypeRef, out PropertyBindingContext visitedContexts);
+                PropertyBindingContext contextsToVisit = currentContext & ~visitedContexts;
+                if (contextsToVisit is 0)
+                {
+                    matchingProperty = null;
+                    return false;
+                }
+
+                visited[current.TypeRef] = visitedContexts | contextsToVisit;
+
+                switch (current)
+                {
+                    case NullableSpec nullableSpec:
+                        return ContainsPropertyTypeConverter(nullableSpec.EffectiveTypeRef, contextsToVisit, out matchingProperty);
+                    case DictionarySpec dictionarySpec:
+                        return ContainsPropertyTypeConverter(
+                            dictionarySpec.ElementTypeRef,
+                            (contextsToVisit & PropertyBindingContext.ExistingInstance) is not 0
+                                ? PropertyBindingContext.ExistingInstance | PropertyBindingContext.CreateInstance
+                                : PropertyBindingContext.CreateInstance,
+                            out matchingProperty);
+                    case CollectionSpec collectionSpec:
+                        return ContainsPropertyTypeConverter(collectionSpec.ElementTypeRef, PropertyBindingContext.CreateInstance, out matchingProperty);
+                    case ObjectSpec objectSpec:
+                        return ContainsObjectPropertyTypeConverter(objectSpec, contextsToVisit, out matchingProperty);
+                    default:
+                        matchingProperty = null;
+                        return false;
+                }
+            }
+
+            bool ContainsObjectPropertyTypeConverter(ObjectSpec objectSpec, PropertyBindingContext currentContext, [NotNullWhen(true)] out PropertySpec? matchingProperty)
+            {
+                bool bindExistingInstance = (currentContext & PropertyBindingContext.ExistingInstance) is not 0;
+                bool createInstance = (currentContext & PropertyBindingContext.CreateInstance) is not 0 && CanInstantiate(objectSpec);
+
+                if ((!bindExistingInstance && !createInstance) || objectSpec.Properties is not { } properties)
+                {
+                    matchingProperty = null;
+                    return false;
+                }
+
+                foreach (PropertySpec property in properties)
+                {
+                    bool isConstructorBound = objectSpec.InstantiationStrategy is ObjectInstantiationStrategy.ParameterizedConstructor &&
+                        property.MatchingCtorParam is not null;
+
+                    if (bindExistingInstance && property.HasTypeConverterOnBindableProperty)
+                    {
+                        matchingProperty = property;
+                        return true;
+                    }
+
+                    if (createInstance && !isConstructorBound && property.HasTypeConverterOnBindableProperty)
+                    {
+                        matchingProperty = property;
+                        return true;
+                    }
+
+                    if (property.IsIgnored)
+                    {
+                        continue;
+                    }
+
+                    if (bindExistingInstance && ContainsPropertyTypeConverterForNormalBinding(property, out matchingProperty))
+                    {
+                        return true;
+                    }
+
+                    if (!createInstance)
+                    {
+                        continue;
+                    }
+
+                    if (isConstructorBound)
+                    {
+                        if (property.HasTypeConverter && property.MatchingCtorParameterTypeMatches)
+                        {
+                            matchingProperty = property;
+                            return true;
+                        }
+
+                        if (ContainsPropertyTypeConverter(property.MatchingCtorParam!.TypeRef, PropertyBindingContext.CreateInstance, out matchingProperty))
+                        {
+                            return true;
+                        }
+                    }
+                    else if (ContainsPropertyTypeConverterForNormalBinding(
+                        property,
+                        out matchingProperty,
+                        duringInitialization: objectSpec.InstantiationStrategy is ObjectInstantiationStrategy.ParameterizedConstructor))
+                    {
+                        return true;
+                    }
+                }
+
+                matchingProperty = null;
+                return false;
+            }
+
+            bool ContainsPropertyTypeConverterForNormalBinding(
+                PropertySpec property,
+                [NotNullWhen(true)] out PropertySpec? matchingProperty,
+                bool duringInitialization = false)
+            {
+                if (!property.CanGet || !_index.TryGetValue(property.TypeRef, out TypeSpec? propertyType))
+                {
+                    matchingProperty = null;
+                    return false;
+                }
+
+                PropertyBindingContext propertyContext = property.CanSet || (duringInitialization && property.SetOnInit)
+                    ? PropertyBindingContext.ExistingInstance | PropertyBindingContext.CreateInstance
+                    : PropertyBindingContext.ExistingInstance;
+                return HasPropertyTypeConverterCore(propertyType, propertyContext, out matchingProperty);
+            }
+
+            bool ContainsPropertyTypeConverter(
+                TypeRef typeRef,
+                PropertyBindingContext currentContext,
+                [NotNullWhen(true)] out PropertySpec? matchingProperty)
+            {
+                if (!_index.TryGetValue(typeRef, out TypeSpec? referencedType))
+                {
+                    matchingProperty = null;
+                    return false;
+                }
+
+                return HasPropertyTypeConverterCore(referencedType, currentContext, out matchingProperty);
+            }
+        }
 
         /// <summary>
         /// Whether binding logic is generated for <paramref name="typeSpec"/>, i.e. whether a non-empty
@@ -168,6 +311,13 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
             }
 
             return "Parse" + displayString;
+        }
+
+        [Flags]
+        private enum PropertyBindingContext
+        {
+            ExistingInstance = 0x1,
+            CreateInstance = 0x2,
         }
     }
 }

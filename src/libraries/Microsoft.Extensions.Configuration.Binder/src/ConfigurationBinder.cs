@@ -315,7 +315,9 @@ namespace Microsoft.Extensions.Configuration
                 propertyBindingPoint,
                 config.GetSection(GetPropertyName(property)),
                 options,
-                false);
+                false,
+                property,
+                instance);
 
             // For property binding, there are some cases when HasNewValue is not set in BindingPoint while a non-null Value inside that object can be retrieved from the property getter.
             // As example, when binding a property which not having a configuration entry matching this property and the getter can initialize the Value.
@@ -334,7 +336,9 @@ namespace Microsoft.Extensions.Configuration
             BindingPoint bindingPoint,
             IConfiguration config,
             BinderOptions options,
-            bool isParentCollection)
+            bool isParentCollection,
+            PropertyInfo? converterProperty = null,
+            object? instance = null)
         {
             // if binding IConfigurationSection, break early
             if (type == typeof(IConfigurationSection))
@@ -364,7 +368,11 @@ namespace Microsoft.Extensions.Configuration
                 isConfigurationExist = configValue != null;
             }
 
-            if (isConfigurationExist && TryConvertValue(type, configValue, section?.Path, out object? convertedValue, out Exception? error))
+            TypeConverter? typeConverter = isConfigurationExist && converterProperty is not null
+                ? GetPropertyTypeConverter(converterProperty, instance)
+                : null;
+
+            if (isConfigurationExist && TryConvertValue(type, configValue, section?.Path, typeConverter, out object? convertedValue, out Exception? error))
             {
                 if (error != null)
                 {
@@ -598,7 +606,7 @@ namespace Microsoft.Extensions.Configuration
 
                 List<PropertyInfo> properties = GetAllProperties(type);
 
-                if (!DoAllParametersHaveEquivalentProperties(parameters, properties, out string nameOfInvalidParameters))
+                if (!DoAllParametersHaveEquivalentProperties(parameters, properties, out string nameOfInvalidParameters, out PropertyInfo?[] parameterProperties))
                 {
                     throw new InvalidOperationException(SR.Format(SR.Error_ConstructorParametersDoNotMatchProperties, type, nameOfInvalidParameters));
                 }
@@ -607,7 +615,7 @@ namespace Microsoft.Extensions.Configuration
 
                 for (int index = 0; index < parameters.Length; index++)
                 {
-                    parameterValues[index] = BindParameter(parameters[index], type, config, options);
+                    parameterValues[index] = BindParameter(parameters[index], parameterProperties[index], type, config, options);
                 }
 
                 constructorParameters = parameters;
@@ -628,32 +636,44 @@ namespace Microsoft.Extensions.Configuration
             return instance ?? throw new InvalidOperationException(SR.Format(SR.Error_FailedToActivate, type));
         }
 
-        private static bool DoAllParametersHaveEquivalentProperties(ParameterInfo[] parameters,
-            List<PropertyInfo> properties, out string missing)
+        private static bool DoAllParametersHaveEquivalentProperties(
+            ParameterInfo[] parameters,
+            List<PropertyInfo> properties,
+            out string missing,
+            out PropertyInfo?[] parameterProperties)
         {
-            HashSet<string> propertyNames = new(StringComparer.OrdinalIgnoreCase);
-            foreach (PropertyInfo prop in properties)
+            Dictionary<string, PropertyInfo> propertyMap = new(properties.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (PropertyInfo property in properties)
             {
-                if (IsIgnoredProperty(prop))
+                if (!IsIgnoredProperty(property) && !propertyMap.ContainsKey(property.Name))
+                {
+                    propertyMap.Add(property.Name, property);
+                }
+            }
+
+            parameterProperties = new PropertyInfo?[parameters.Length];
+            List<string>? missingParameters = null;
+
+            for (int index = 0; index < parameters.Length; index++)
+            {
+                ParameterInfo parameter = parameters[index];
+                string? parameterName = parameter.Name;
+                if (parameterName is null)
                 {
                     continue;
                 }
 
-                propertyNames.Add(prop.Name);
-            }
-
-            List<string> missingParameters = new();
-
-            foreach (ParameterInfo parameter in parameters)
-            {
-                string name = parameter.Name!;
-                if (!propertyNames.Contains(name))
+                if (propertyMap.TryGetValue(parameterName, out PropertyInfo? property))
                 {
-                    missingParameters.Add(name);
+                    parameterProperties[index] = property;
+                }
+                else
+                {
+                    (missingParameters ??= new()).Add(parameterName);
                 }
             }
 
-            missing = string.Join(",", missingParameters);
+            missing = missingParameters is null ? string.Empty : string.Join(",", missingParameters);
 
             return missing.Length == 0;
         }
@@ -985,33 +1005,43 @@ namespace Microsoft.Extensions.Configuration
         [RequiresUnreferencedCode(TrimmingWarningMessage)]
         private static bool TryConvertValue(
             Type type,
-            string? value, string? path, out object? result, out Exception? error)
+            string? value,
+            string? path,
+            TypeConverter? typeConverter,
+            out object? result,
+            out Exception? error)
         {
             error = null;
             result = null;
-            if (type == typeof(object))
+            bool usePropertyConverter = typeConverter is not null && typeConverter.CanConvertFrom(typeof(string));
+            if (!usePropertyConverter && type == typeof(object))
             {
                 result = value;
                 return true;
             }
 
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Nullable<>))
+            if (!usePropertyConverter && type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Nullable<>))
             {
                 if (string.IsNullOrEmpty(value))
                 {
                     return true;
                 }
-                return TryConvertValue(Nullable.GetUnderlyingType(type)!, value, path, out result, out error);
+                return TryConvertValue(Nullable.GetUnderlyingType(type)!, value, path, typeConverter: null, out result, out error);
             }
 
-            TypeConverter converter = TypeDescriptor.GetConverter(type);
-            if (converter.CanConvertFrom(typeof(string)))
+            if (!usePropertyConverter)
+            {
+                typeConverter = TypeDescriptor.GetConverter(type);
+            }
+
+            Debug.Assert(typeConverter is not null);
+            if (usePropertyConverter || typeConverter.CanConvertFrom(typeof(string)))
             {
                 try
                 {
                     if (value is not null)
                     {
-                        result = converter.ConvertFromInvariantString(value);
+                        result = typeConverter.ConvertFromInvariantString(value);
                     }
                 }
                 catch (Exception ex)
@@ -1045,7 +1075,7 @@ namespace Microsoft.Extensions.Configuration
             Type type,
             string value, string? path)
         {
-            TryConvertValue(type, value, path, out object? result, out Exception? error);
+            TryConvertValue(type, value, path, typeConverter: null, out object? result, out Exception? error);
             if (error != null)
             {
                 throw error;
@@ -1230,7 +1260,7 @@ namespace Microsoft.Extensions.Configuration
 
         [RequiresDynamicCode(DynamicCodeWarningMessage)]
         [RequiresUnreferencedCode(PropertyTrimmingWarningMessage)]
-        private static object? BindParameter(ParameterInfo parameter, Type type, IConfiguration config,
+        private static object? BindParameter(ParameterInfo parameter, PropertyInfo? property, Type type, IConfiguration config,
             BinderOptions options)
         {
             string? parameterName = parameter.Name;
@@ -1241,13 +1271,13 @@ namespace Microsoft.Extensions.Configuration
             }
 
             var propertyBindingPoint = new BindingPoint(isReadOnly: false);
-
             BindInstance(
                 parameter.ParameterType,
                 propertyBindingPoint,
                 config.GetSection(parameterName),
                 options,
-                false);
+                false,
+                property is not null && property.PropertyType == parameter.ParameterType ? property : null);
 
             if (propertyBindingPoint.Value is null)
             {
@@ -1267,6 +1297,50 @@ namespace Microsoft.Extensions.Configuration
 
         private static bool IsIgnoredProperty(PropertyInfo property) =>
             Attribute.IsDefined(property, typeof(ConfigurationIgnoreAttribute), inherit: true);
+
+        [RequiresUnreferencedCode(PropertyTrimmingWarningMessage)]
+        private static TypeConverter? GetPropertyTypeConverter(PropertyInfo property, object? instance)
+        {
+            if (Attribute.GetCustomAttribute(property, typeof(TypeConverterAttribute), inherit: true) is null)
+            {
+                return null;
+            }
+
+            Type? declaringType = property.DeclaringType;
+            Debug.Assert(declaringType is not null);
+
+            bool attributeDeclaredOnProperty = property.IsDefined(typeof(TypeConverterAttribute), inherit: false);
+            PropertyDescriptor? descriptor = attributeDeclaredOnProperty
+                ? (instance is not null ? TypeDescriptor.GetProperties(instance)[property.Name] : TypeDescriptor.GetProperties(declaringType)[property.Name])
+                : null;
+
+            if (descriptor is null || descriptor.ComponentType != declaringType || descriptor.PropertyType != property.PropertyType)
+            {
+                descriptor = CreatePropertyDescriptor(property);
+            }
+
+            TypeConverter converter = descriptor.Converter;
+            if ((property.PropertyType == typeof(object) || Nullable.GetUnderlyingType(property.PropertyType) is not null) &&
+                ReferenceEquals(converter, TypeDescriptor.GetConverter(property.PropertyType)))
+            {
+                return null;
+            }
+
+            return converter;
+        }
+
+        [RequiresUnreferencedCode(PropertyTrimmingWarningMessage)]
+        private static PropertyDescriptor CreatePropertyDescriptor(PropertyInfo property)
+        {
+            Type? declaringType = property.DeclaringType;
+            Debug.Assert(declaringType is not null);
+
+            return TypeDescriptor.CreateProperty(
+                declaringType,
+                property.Name,
+                property.PropertyType,
+                Attribute.GetCustomAttributes(property, inherit: true));
+        }
 
         private static string GetPropertyName(PropertyInfo property)
         {

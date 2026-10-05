@@ -5,6 +5,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text;
@@ -180,6 +181,190 @@ namespace Microsoft.Extensions.SourceGeneration.Configuration.Binder.Tests
                 Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
                 Assert.NotNull(diagnostic.Location);
             }
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsNetCore))]
+        public async Task PropertyTypeConverterOnUnsupportedPropertyUsesReflectionFallback()
+        {
+            string source = """
+                using System;
+                using System.Collections.Generic;
+                using System.ComponentModel;
+                using System.Globalization;
+                using Microsoft.Extensions.Configuration;
+
+                public class Program
+                {
+                    public static object? Result;
+
+                    public static void Main()
+                    {
+                        ConfigurationBuilder builder = new();
+                        builder.AddInMemoryCollection(new Dictionary<string, string?>
+                        {
+                            ["Value"] = "41",
+                            ["Factory"] = "41",
+                        });
+                        IConfiguration configuration = builder.Build();
+
+                        MixedOptions options = configuration.Get<MixedOptions>()!;
+                        Result = new object[] { options.Value, options.Factory() };
+                    }
+                }
+
+                public sealed class MixedOptions
+                {
+                    [TypeConverter(typeof(AddOneConverter))]
+                    public int Value { get; set; }
+
+                    [TypeConverter(typeof(FactoryConverter))]
+                    public Func<int> Factory { get; set; } = null!;
+                }
+
+                public sealed class AddOneConverter : TypeConverter
+                {
+                    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+                        sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+
+                    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) =>
+                        value is string text
+                            ? int.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) + 1
+                            : base.ConvertFrom(context, culture, value);
+                }
+
+                public sealed class FactoryConverter : TypeConverter
+                {
+                    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+                        sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+
+                    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value)
+                    {
+                        int converted = int.Parse((string)value, NumberStyles.Integer, CultureInfo.InvariantCulture) + 1;
+                        return new Func<int>(() => converted);
+                    }
+                }
+                """;
+
+            ConfigBindingGenRunResult result = await RunGeneratorAndUpdateCompilation(
+                source,
+                assemblyReferences: GetAssemblyRefsWithAdditional(typeof(TypeConverter), typeof(TypeConverterAttribute)));
+
+            result.ValidateDiagnostics(ExpectedDiagnostics.FromGeneratorOnly);
+            Assert.False(result.GeneratedSource.HasValue);
+
+            Diagnostic diagnostic = Assert.Single(result.Diagnostics);
+            string message = diagnostic.GetMessage(CultureInfo.InvariantCulture);
+
+            Assert.Equal(Diagnostics.PropertyTypeConverterRequiresReflection.Id, diagnostic.Id);
+            Assert.Contains(Diagnostics.PropertyTypeConverterRequiresReflection.Title, diagnostic.Descriptor.Title.ToString(CultureInfo.InvariantCulture));
+            Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
+            Assert.Contains("'Value'", message);
+            Assert.Contains("MixedOptions", message);
+            Assert.Contains("AddOneConverter", message);
+
+            var values = (object[])LoadAndInvokeMain(result.OutputCompilation, "Result")!;
+            Assert.Equal(new object[] { 42, 42 }, values);
+        }
+
+        [ConditionalFact(typeof(PlatformDetection), nameof(PlatformDetection.IsNetCore))]
+        public async Task PropertyTypeConverterOnUnbindablePropertyDoesNotUseReflectionFallback()
+        {
+            string source = """
+                using System;
+                using System.Collections.Generic;
+                using System.ComponentModel;
+                using System.Globalization;
+                using Microsoft.Extensions.Configuration;
+
+                public class Program
+                {
+                    public static object? Result;
+
+                    public static void Main()
+                    {
+                        ConfigurationBuilder builder = new();
+                        builder.AddInMemoryCollection(new Dictionary<string, string?>
+                        {
+                            ["Private:Hidden"] = "41",
+                            ["Private:Value"] = "7",
+                            ["Ignored:Hidden"] = "41",
+                            ["Ignored:Value"] = "7",
+                            ["Section:Hidden"] = "41",
+                        });
+                        IConfiguration configuration = builder.Build();
+
+                        PrivateOptions privateOptions = configuration.GetSection("Private").Get<PrivateOptions>()!;
+                        IgnoredOptions ignoredOptions = configuration.GetSection("Ignored").Get<IgnoredOptions>()!;
+                        SectionOptions sectionOptions = configuration.GetSection("Section").Get<SectionOptions>()!;
+
+                        Result = new object[]
+                        {
+                            privateOptions.Value,
+                            privateOptions.GetHidden(),
+                            ignoredOptions.Value,
+                            ignoredOptions.Hidden,
+                            sectionOptions.Hidden.Value!,
+                        };
+                    }
+                }
+
+                public sealed class PrivateOptions
+                {
+                    [TypeConverter(typeof(AddOneConverter))]
+                    private int Hidden { get; set; }
+
+                    public int Value { get; set; }
+
+                    public int GetHidden() => Hidden;
+                }
+
+                public sealed class IgnoredOptions
+                {
+                    [ConfigurationIgnore]
+                    [TypeConverter(typeof(AddOneConverter))]
+                    public int Hidden { get; set; }
+
+                    public int Value { get; set; }
+                }
+
+                public sealed class SectionOptions
+                {
+                    [TypeConverter(typeof(ThrowingConverter))]
+                    public IConfigurationSection Hidden { get; set; } = null!;
+                }
+
+                public sealed class AddOneConverter : TypeConverter
+                {
+                    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+                        sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+
+                    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) =>
+                        value is string text
+                            ? int.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) + 1
+                            : base.ConvertFrom(context, culture, value);
+                }
+
+                public sealed class ThrowingConverter : TypeConverter
+                {
+                    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+                        sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+
+                    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) =>
+                        throw new InvalidOperationException("Converter should not be used.");
+                }
+                """;
+
+            ConfigBindingGenRunResult result = await RunGeneratorAndUpdateCompilation(
+                source,
+                assemblyReferences: GetAssemblyRefsWithAdditional(typeof(TypeConverter), typeof(TypeConverterAttribute)));
+
+            result.ValidateDiagnostics(ExpectedDiagnostics.None);
+            Assert.NotNull(result.GeneratedSource);
+            Assert.Empty(result.Diagnostics);
+            await VerifySuppressedCallsMatchInterceptedCalls(result);
+
+            var values = (object[])LoadAndInvokeMain(result.OutputCompilation, "Result")!;
+            Assert.Equal(new object[] { 7, 0, 7, 0, "41" }, values);
         }
 
         [Fact]

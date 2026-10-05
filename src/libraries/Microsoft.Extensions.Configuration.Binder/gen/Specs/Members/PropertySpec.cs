@@ -23,6 +23,7 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
             SetOnInit = setterIsPublic && (property.IsRequired || isInitOnly);
             CanSet = setterIsPublic && !isInitOnly;
             CanGet = getMethod?.DeclaredAccessibility is Accessibility.Public;
+            ContainingTypeFullName = property.ContainingType.GetFullName();
         }
 
         private static IMethodSymbol? GetEffectiveAccessor(IPropertySymbol property, bool getter)
@@ -43,9 +44,21 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
 
         public bool IsIgnored { get; init; }
 
+        public bool HasTypeConverter { get; init; }
+
+        public bool HasTypeConverterOnBindableProperty { get; init; }
+
         public bool IsStatic { get; }
 
+        public bool MatchingCtorParameterTypeMatches { get; set; }
+
         public bool SetOnInit { get; }
+
+        public string ContainingTypeFullName { get; }
+
+        public string? TypeConverterDeclaringTypeFullName { get; init; }
+
+        public string? TypeConverterDisplayName { get; init; }
 
         public override bool CanGet { get; }
 

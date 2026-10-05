@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -126,6 +127,18 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                 {
                     TypeSpec typeSpec = _createdTypeSpecs[typeParseInfo.TypeSymbol];
                     MethodsToGen overload = typeParseInfo.BindingOverload;
+
+                    if (typeIndex.HasPropertyTypeConverter(typeSpec, overload, out PropertySpec? property))
+                    {
+                        Debug.Assert(property.TypeConverterDisplayName is not null);
+                        RecordDiagnostic(
+                            DiagnosticDescriptors.PropertyTypeConverterRequiresReflection,
+                            typeParseInfo.BinderInvocation.Location,
+                            property.Name,
+                            property.TypeConverterDeclaringTypeFullName ?? property.ContainingTypeFullName,
+                            property.TypeConverterDisplayName);
+                        continue;
+                    }
 
                     if ((MethodsToGen.ConfigBinder_Any & overload) is not 0)
                     {
@@ -631,13 +644,38 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                 return false;
             }
 
-            private bool ConstructorParametersContainUnsupportedType(IMethodSymbol ctor)
+            private bool ConstructorParametersContainUnsupportedType(IMethodSymbol ctor, INamedTypeSymbol typeSymbol)
             {
                 foreach (IParameterSymbol parameter in ctor.Parameters)
                 {
-                    if (IsUnsupportedType(parameter.Type))
+                    if (IsUnsupportedType(parameter.Type) && !HasMatchingPropertyTypeConverter(typeSymbol, parameter))
                     {
                         return true;
+                    }
+                }
+
+                return false;
+            }
+
+            private bool HasMatchingPropertyTypeConverter(INamedTypeSymbol typeSymbol, IParameterSymbol parameter)
+            {
+                for (INamedTypeSymbol? current = typeSymbol; current is not null; current = current.BaseType)
+                {
+                    foreach (IPropertySymbol property in current.GetMembers().OfType<IPropertySymbol>())
+                    {
+                        if (property is { IsIndexer: true } or { IsImplicitlyDeclared: true } ||
+                            !string.Equals(property.Name, parameter.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        if (GetPropertyAttribute(property, _typeSymbols.ConfigurationIgnoreAttribute) is not null)
+                        {
+                            return false;
+                        }
+
+                        return SymbolEqualityComparer.Default.Equals(property.Type, parameter.Type) &&
+                            HasTypeConverterAttribute(property);
                     }
                 }
 
@@ -677,7 +715,7 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                         {
                             parameterlessCtor = candidate;
                         }
-                        else if (!ConstructorParametersContainUnsupportedType(candidate))
+                        else if (!ConstructorParametersContainUnsupportedType(candidate, typeSymbol))
                         {
                             if (parameterizedCtor is not null)
                             {
@@ -731,16 +769,57 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                         if (member is IPropertySymbol { IsIndexer: false, IsImplicitlyDeclared: false } property)
                         {
                             string propertyName = property.Name;
-                            bool isDuplicate = properties?.ContainsKey(propertyName) is true;
+                            AttributeData? attributeData = GetPropertyAttribute(property, _typeSymbols.ConfigurationKeyNameAttribute);
+                            string configKeyName = attributeData?.ConstructorArguments.FirstOrDefault().Value as string ?? propertyName;
+                            bool isIgnored = GetPropertyAttribute(property, _typeSymbols.ConfigurationIgnoreAttribute) is not null;
+                            (IPropertySymbol Property, AttributeData Attribute)? typeConverterAttributeInfo = GetTypeConverterAttributeInfo(property);
+                            bool hasTypeConverter = typeConverterAttributeInfo is not null;
+                            string? typeConverterDeclaringTypeFullName = typeConverterAttributeInfo is { } typeConverterInfo
+                                ? typeConverterInfo.Property.ContainingType.GetFullName()
+                                : null;
+                            string? typeConverterDisplayName = typeConverterAttributeInfo is { } typeConverterInfo2
+                                ? GetTypeConverterDisplayName(typeConverterInfo2.Attribute)
+                                : null;
+
+                            PropertySpec spec = new(property, new TypeRef(property.Type))
+                            {
+                                ConfigurationKeyName = configKeyName,
+                                IsIgnored = isIgnored,
+                                HasTypeConverter = hasTypeConverter,
+                                HasTypeConverterOnBindableProperty = !isIgnored && property.GetMethod?.DeclaredAccessibility is Accessibility.Public && hasTypeConverter,
+                                TypeConverterDeclaringTypeFullName = typeConverterDeclaringTypeFullName,
+                                TypeConverterDisplayName = typeConverterDisplayName,
+                            };
+
+                            if (properties?.TryGetValue(propertyName, out PropertySpec? existingProperty) is true)
+                            {
+                                if (spec.HasTypeConverterOnBindableProperty && !existingProperty.HasTypeConverterOnBindableProperty)
+                                {
+                                    properties[propertyName] = existingProperty with
+                                    {
+                                        HasTypeConverterOnBindableProperty = true,
+                                        TypeConverterDeclaringTypeFullName = spec.TypeConverterDeclaringTypeFullName,
+                                        TypeConverterDisplayName = spec.TypeConverterDisplayName,
+                                    };
+                                }
+
+                                continue;
+                            }
 
                             if (IsUnsupportedType(property.Type))
                             {
-                                // Report the skip once per property name. The duplicate check covers an
-                                // error-typed property that overrides or shadows an already-bound member, while
-                                // the name set covers a `new`-shadowed error-typed property: both the base and
-                                // derived copies are skipped (so neither lands in 'properties' to dedupe the other),
-                                // which would otherwise fire SYSLIB1101 twice for the same name.
-                                if (ContainsErrorType(property.Type) && !isDuplicate &&
+                                if (hasTypeConverter &&
+                                    (spec.HasTypeConverterOnBindableProperty || BacksConstructorParameter(ctor, propertyName)))
+                                {
+                                    (properties ??= new(StringComparer.OrdinalIgnoreCase))[propertyName] = spec;
+                                    continue;
+                                }
+
+                                // Report the skip once per property name. The name set covers a `new`-shadowed
+                                // error-typed property: both the base and derived copies are skipped (so neither
+                                // lands in 'properties' to dedupe the other), which would otherwise fire
+                                // SYSLIB1101 twice for the same name.
+                                if (ContainsErrorType(property.Type) &&
                                     (reportedUnsupportedProperties ??= new(StringComparer.OrdinalIgnoreCase)).Add(propertyName))
                                 {
                                     RecordDiagnostic(DiagnosticDescriptors.PropertyNotSupported, typeParseInfo.BinderInvocation?.Location, [propertyName, typeParseInfo.FullName]);
@@ -748,21 +827,6 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
 
                                 continue;
                             }
-
-                            if (isDuplicate)
-                            {
-                                continue;
-                            }
-
-                            AttributeData? attributeData = GetPropertyAttribute(property, _typeSymbols.ConfigurationKeyNameAttribute);
-                            string configKeyName = attributeData?.ConstructorArguments.FirstOrDefault().Value as string ?? propertyName;
-                            bool isIgnored = GetPropertyAttribute(property, _typeSymbols.ConfigurationIgnoreAttribute) is not null;
-
-                            PropertySpec spec = new(property, new TypeRef(property.Type))
-                            {
-                                ConfigurationKeyName = configKeyName,
-                                IsIgnored = isIgnored,
-                            };
 
                             if (!spec.IsIgnored && (spec.CanGet || spec.CanSet || BacksConstructorParameter(ctor, propertyName)))
                             {
@@ -797,12 +861,24 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                         }
                         else
                         {
-                            ParameterSpec paramSpec = new ParameterSpec(parameter, propertySpec.TypeRef)
+                            TypeRef parameterTypeRef = new(parameter.Type);
+                            if (!IsUnsupportedType(parameter.Type))
+                            {
+                                EnqueueTransitiveType(
+                                    typeParseInfo,
+                                    parameter.Type,
+                                    DiagnosticDescriptors.PropertyNotSupported,
+                                    parameterName,
+                                    parameterTypeRef);
+                            }
+
+                            ParameterSpec paramSpec = new ParameterSpec(parameter, parameterTypeRef)
                             {
                                 ConfigurationKeyName = propertySpec.ConfigurationKeyName,
                             };
 
                             propertySpec.MatchingCtorParam = paramSpec;
+                            propertySpec.MatchingCtorParameterTypeMatches = parameterTypeRef.Equals(propertySpec.TypeRef);
                             (ctorParams ??= new()).Add(paramSpec);
                         }
                     }
@@ -837,7 +913,7 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
             private static UnsupportedTypeSpec CreateUnsupportedCollectionSpec(TypeParseInfo typeParseInfo)
                 => CreateUnsupportedTypeSpec(typeParseInfo, NotSupportedReason.CollectionNotSupported);
 
-            private static AttributeData? GetPropertyAttribute(IPropertySymbol property, INamedTypeSymbol? attributeType)
+            private static (IPropertySymbol Property, AttributeData Attribute)? GetPropertyAttributeInfo(IPropertySymbol property, INamedTypeSymbol? attributeType)
             {
                 for (IPropertySymbol? current = property; current is not null; current = current.OverriddenProperty)
                 {
@@ -845,11 +921,50 @@ namespace Microsoft.Extensions.Configuration.Binder.SourceGeneration
                         SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, attributeType));
                     if (attribute is not null)
                     {
-                        return attribute;
+                        return (current, attribute);
                     }
                 }
 
                 return null;
+            }
+
+            private static AttributeData? GetPropertyAttribute(IPropertySymbol property, INamedTypeSymbol? attributeType) =>
+                GetPropertyAttributeInfo(property, attributeType)?.Attribute;
+
+            private (IPropertySymbol Property, AttributeData Attribute)? GetTypeConverterAttributeInfo(IPropertySymbol property)
+            {
+                (IPropertySymbol Property, AttributeData Attribute)? attributeInfo = GetPropertyAttributeInfo(property, _typeSymbols.TypeConverterAttribute);
+                if (attributeInfo is not { } info ||
+                    SymbolEqualityComparer.Default.Equals(property.Type, _typeSymbols.IConfigurationSection))
+                {
+                    return null;
+                }
+
+                ImmutableArray<TypedConstant> constructorArguments = info.Attribute.ConstructorArguments;
+                if (constructorArguments.Length == 0)
+                {
+                    return null;
+                }
+
+                object? converterArgument = constructorArguments[0].Value;
+                return converterArgument is null || converterArgument is string { Length: 0 }
+                    ? null
+                    : info;
+            }
+
+            private bool HasTypeConverterAttribute(IPropertySymbol property) =>
+                GetTypeConverterAttributeInfo(property) is not null;
+
+            private static string GetTypeConverterDisplayName(AttributeData attribute)
+            {
+                Debug.Assert(attribute.ConstructorArguments is { Length: > 0 });
+
+                return attribute.ConstructorArguments[0].Value switch
+                {
+                    INamedTypeSymbol converterType => converterType.GetFullName(),
+                    string converterTypeName => converterTypeName,
+                    _ => typeof(TypeConverterAttribute).FullName!,
+                };
             }
 
             private static UnsupportedTypeSpec CreateUnsupportedTypeSpec(TypeParseInfo typeParseInfo, NotSupportedReason reason) =>
