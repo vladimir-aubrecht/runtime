@@ -21,6 +21,7 @@ namespace Microsoft.Extensions.Configuration.EnvironmentFiles
     {
         public EnvironmentFileConfigurationProvider(Microsoft.Extensions.Configuration.EnvironmentFiles.EnvironmentFileConfigurationSource source) : base (default(Microsoft.Extensions.Configuration.FileConfigurationSource)) { }
         protected override void Dispose(bool disposing) { }
+        public override void Load() { }
         public override void Load(System.IO.Stream stream) { }
     }
     public partial class EnvironmentFileConfigurationSource : Microsoft.Extensions.Configuration.FileConfigurationSource

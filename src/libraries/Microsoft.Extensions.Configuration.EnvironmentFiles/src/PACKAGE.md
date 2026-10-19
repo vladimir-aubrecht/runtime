@@ -35,6 +35,12 @@ overload; that provider retains its own settings and ownership. For an explicit
 `PhysicalFileProvider`, use `ExclusionFilters.None` when dot-prefixed files must
 be included. Non-physical builder file providers are used unchanged.
 
+If initial file loading fails without being ignored by `OnLoadException`, the
+configuration provider releases its change subscription and any physical
+provider it owns. Supplied file providers remain caller-owned. Later reload
+failures follow the normal file-configuration error policy without disposing
+the provider, so a corrected file can be loaded again.
+
 Later providers override earlier providers. In the example, process environment
 variables and command-line arguments override file values. Adding a provider
 after a host builder has already been initialized does not reinitialize host

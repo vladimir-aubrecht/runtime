@@ -4,34 +4,48 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 
 namespace Microsoft.Extensions.Configuration.EnvironmentFiles;
 
 /// <summary>
 /// Provides configuration key-value pairs from an environment file without modifying process environment variables.
 /// </summary>
+/// <param name="source">The environment file configuration source.</param>
+/// <exception cref="ArgumentNullException"><paramref name="source"/> is <see langword="null"/>.</exception>
 /// <remarks>
 /// Names are case-insensitive, and double underscores in names are replaced with the configuration key delimiter.
 /// The last assignment to a configuration key wins. Values are not interpolated or unescaped.
 /// </remarks>
-public class EnvironmentFileConfigurationProvider : FileConfigurationProvider
+public class EnvironmentFileConfigurationProvider(EnvironmentFileConfigurationSource source) : FileConfigurationProvider(source)
 {
-    private readonly EnvironmentFileSyntax _syntax;
+    private readonly EnvironmentFileSyntax _syntax = GetSyntax(source);
     private readonly IDisposable? _ownedFileProvider;
+    private bool _hasLoaded;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="EnvironmentFileConfigurationProvider"/> class.
-    /// </summary>
-    /// <param name="source">The environment file configuration source.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="source"/> is <see langword="null"/>.</exception>
-    public EnvironmentFileConfigurationProvider(EnvironmentFileConfigurationSource source) : this(source, ownedFileProvider: null)
+    internal EnvironmentFileConfigurationProvider(EnvironmentFileConfigurationSource source, IDisposable? ownedFileProvider) : this(source)
     {
+        _ownedFileProvider = ownedFileProvider;
     }
 
-    internal EnvironmentFileConfigurationProvider(EnvironmentFileConfigurationSource source, IDisposable? ownedFileProvider) : base(source)
+    /// <inheritdoc />
+    /// <remarks>A failed initial file load releases change notifications and any owned file provider.</remarks>
+    public override void Load()
     {
-        _syntax = source.Syntax;
-        _ownedFileProvider = ownedFileProvider;
+        try
+        {
+            base.Load();
+            Volatile.Write(ref _hasLoaded, true);
+        }
+        catch
+        {
+            if (!Volatile.Read(ref _hasLoaded))
+            {
+                Dispose();
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -62,5 +76,11 @@ public class EnvironmentFileConfigurationProvider : FileConfigurationProvider
         {
             _ownedFileProvider?.Dispose();
         }
+    }
+
+    private static EnvironmentFileSyntax GetSyntax(EnvironmentFileConfigurationSource source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return source.Syntax;
     }
 }

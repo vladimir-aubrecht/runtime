@@ -17,3 +17,11 @@ optional files, reload notifications, and exception handling.
 See [the package documentation](src/PACKAGE.md) for the supported syntax and usage.
 
 Build and run the tests with the repository's `build-and-test` workflow.
+
+## Known infrastructure limitation
+
+Cleanup after this provider's own initial load failure does not make an entire
+configuration build transactional. The shared configuration infrastructure can
+leave previously created providers or registrations undisposed when a later
+source fails during construction or replacement. Exception-safe cleanup of
+those shared paths is a separate configuration-infrastructure follow-up.
